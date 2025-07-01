@@ -129,7 +129,19 @@ def enviar_ficha_plataforma(numero, nombre, precio, url_imagen):
     )
 
 def enviar_metodos_pago(numero):
-    texto = """💳 Estos son nuestros medios de pago disponibles. Puedes transferir a cualquiera y enviar el comprobante aquí mismo 📲\n\nUna vez recibido, activamos tu cuenta de inmediato. ¿Te confirmo el total a pagar? ✅"""
+    texto = """
+Para realizar el pago, puedes usar cualquiera de nuestros métodos:
+
+> 🟦Nequi: 3144413062 (JH** VAR***)
+
+> 🟥Daviplata: 3144413062
+
+> 🟨Bancolombia: 912-683039-91 (Cuenta de Ahorros)
+
+Por favor, envía el comprobante a este *WHATSAPP* y confirmaremos tu pedido. ¡Gracias por tu compra!
+
+> Si tienes alguna duda, escribe "soporte" y te atenderemos de inmediato
+"""
     url_pago = "https://i.postimg.cc/SRyhCnY9/Medio-De-Pago-Actualizado.png"
     requests.post(
         ULTRAMSG_IMG_URL,
@@ -144,17 +156,7 @@ def enviar_metodos_pago(numero):
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        if not request.is_json:
-            logger.warning("❌ Contenido no es JSON")
-            return jsonify({"status": "invalid", "error": "Formato no JSON"}), 400
-
-        data = request.get_json()
-        logger.info(f"📨 Webhook recibido: {data}")
-
-        if 'data' not in data or 'from' not in data['data'] or 'body' not in data['data']:
-            logger.error("❌ Datos incompletos en el webhook")
-            return jsonify({"status": "invalid", "error": "Faltan campos requeridos"}), 400
-
+        data = request.json
         sender = data['data']['from']
         user_msg = quitar_tildes(data['data']['body'].lower())
 
@@ -238,9 +240,7 @@ Si tienes dudas o necesitas ayuda para elegir la mejor opción, ¡escríbenos! �
         return jsonify({"status": "success"}), 200
 
     except Exception as e:
-        import traceback
         logger.error(f"❌ Error en webhook: {e}")
-        logger.error(traceback.format_exc())
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/health', methods=['GET'])
