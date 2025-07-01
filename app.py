@@ -146,22 +146,18 @@ def webhook():
     try:
         logger.info("➡️ Webhook recibido")
 
-        if not request.is_json:
-            logger.warning("❌ Formato no JSON")
-            return jsonify({"status": "invalid_format"}), 400
-
-        data = request.get_json()
+        # UltraMsg envía datos como form-urlencoded
+        data = request.form.to_dict()
         logger.info(f"📨 Contenido recibido: {data}")
 
-        if not data or 'data' not in data or 'from' not in data['data'] or 'body' not in data['data']:
-            logger.warning("⚠️ Estructura de datos inválida")
+        if not data or 'from' not in data or 'body' not in data:
+            logger.warning("⚠️ Campos requeridos no encontrados en el webhook")
             return jsonify({"status": "missing_fields"}), 400
 
-        sender = data['data']['from']
-        user_msg = quitar_tildes(data['data']['body'].lower())
+        sender = data['from']
+        user_msg = quitar_tildes(data['body'].lower())
 
         logger.info(f"✅ Mensaje de {sender}: {user_msg}")
-
         if data.get('event_type') != 'message_received' or sender == ULTRAMSG_INSTANCE:
             return jsonify({"status": "ignored"}), 200
 
@@ -239,14 +235,13 @@ Si tienes dudas o necesitas ayuda para elegir la mejor opción, ¡escríbenos! �
         if len(conversation_memory[sender]) > 20:
             conversation_memory[sender] = conversation_memory[sender][-10:]
 
-        return jsonify({"status": "success"}), 200
+        return jsonify({"status": "ok"}), 200
 
     except Exception as e:
         import traceback
         logger.error(f"❌ ERROR webhook: {e}")
         logger.error(traceback.format_exc())
         return jsonify({"status": "error", "message": str(e)}), 500
-
 @app.route('/health', methods=['GET'])
 def health():
     return jsonify({
