@@ -144,19 +144,23 @@ def enviar_metodos_pago(numero):
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
+        logger.info("➡️ Webhook recibido")
+
         if not request.is_json:
-            logger.warning("❌ Contenido no es JSON")
-            return jsonify({"status": "invalid", "error": "Formato no JSON"}), 400
+            logger.warning("❌ Formato no JSON")
+            return jsonify({"status": "invalid_format"}), 400
 
         data = request.get_json()
-        logger.info(f"📨 Webhook recibido: {data}")
+        logger.info(f"📨 Contenido recibido: {data}")
 
-        if 'data' not in data or 'from' not in data['data'] or 'body' not in data['data']:
-            logger.error("❌ Datos incompletos en el webhook")
-            return jsonify({"status": "invalid", "error": "Faltan campos requeridos"}), 400
+        if not data or 'data' not in data or 'from' not in data['data'] or 'body' not in data['data']:
+            logger.warning("⚠️ Estructura de datos inválida")
+            return jsonify({"status": "missing_fields"}), 400
 
         sender = data['data']['from']
         user_msg = quitar_tildes(data['data']['body'].lower())
+
+        logger.info(f"✅ Mensaje de {sender}: {user_msg}")
 
         if data.get('event_type') != 'message_received' or sender == ULTRAMSG_INSTANCE:
             return jsonify({"status": "ignored"}), 200
@@ -239,7 +243,7 @@ Si tienes dudas o necesitas ayuda para elegir la mejor opción, ¡escríbenos! �
 
     except Exception as e:
         import traceback
-        logger.error(f"❌ Error en webhook: {e}")
+        logger.error(f"❌ ERROR webhook: {e}")
         logger.error(traceback.format_exc())
         return jsonify({"status": "error", "message": str(e)}), 500
 
