@@ -1,4 +1,4 @@
-# MULTIPLAY MULTIMARCA Chatbot completo con tildes ignoradas, modo soporte, medios de pago y fichas visuales
+# MULTIPLAY MULTIMARCA Chatbot completo con tildes ignoradas, modo soporte, medios de pago, fichas visuales, horario y derivación a humano
 
 from flask import Flask, request, jsonify
 import requests
@@ -6,7 +6,7 @@ import openai
 import os
 import logging
 import unicodedata
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 
 # Cargar variables de entorno desde .env
@@ -45,6 +45,8 @@ except Exception as e:
 
 conversation_memory = {}
 clientes_en_soporte = set()
+bloqueados_temporalmente = {}
+ultimo_saludo = {}
 
 # Quitar tildes
 def quitar_tildes(texto):
@@ -129,7 +131,19 @@ def enviar_ficha_plataforma(numero, nombre, precio, url_imagen):
     )
 
 def enviar_metodos_pago(numero):
-    texto = """💳 Estos son nuestros medios de pago disponibles. Puedes transferir a cualquiera y enviar el comprobante aquí mismo 📲\n\nUna vez recibido, activamos tu cuenta de inmediato. ¿Te confirmo el total a pagar? ✅"""
+    texto = """
+Para realizar el pago, puedes usar cualquiera de nuestros métodos:
+
+> 🟦Nequi: 3144413062 (JH** VAR***)
+
+> 🟥Daviplata: 3144413062
+
+> 🟨Bancolombia: 912-683039-91 (Cuenta de Ahorros)
+
+Por favor, envía el comprobante a este *WHATSAPP* y confirmaremos tu pedido. ¡Gracias por tu compra!
+
+> Si tienes alguna duda, escribe "soporte" y te atenderemos de inmediato
+"""
     url_pago = "https://i.postimg.cc/SRyhCnY9/Medio-De-Pago-Actualizado.png"
     requests.post(
         ULTRAMSG_IMG_URL,
@@ -144,22 +158,22 @@ def enviar_metodos_pago(numero):
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        if not request.is_json:
-            logger.warning("❌ Contenido no es JSON")
-            return jsonify({"status": "invalid", "error": "Formato no JSON"}), 400
-
-        data = request.get_json()
-        logger.info(f"📨 Webhook recibido: {data}")
-
-        if 'data' not in data or 'from' not in data['data'] or 'body' not in data['data']:
-            logger.error("❌ Datos incompletos en el webhook")
-            return jsonify({"status": "invalid", "error": "Faltan campos requeridos"}), 400
-
+        data = request.json
         sender = data['data']['from']
-        user_msg = quitar_tildes(data['data']['body'].lower())
+        tipo = data['data'].get('type', '')
+        body = data['data'].get('body', '')
+        user_msg = quitar_tildes(body.lower()) if body else ''
+        now = datetime.utcnow() - timedelta(hours=5)  # Colombia UTC-5
 
-        if data.get('event_type') != 'message_received' or sender == ULTRAMSG_INSTANCE:
-            return jsonify({"status": "ignored"}), 200
+        if tipo == 'image':
+            bloqueados_temporalmente[sender] = now + timedelta(hours=1)
+            enviar_mensaje_whatsapp(sender, "🕒 Hemos recibido tu solicitud. En un momento uno de nuestros encargados se comunicará contigo. Muchas gracias por tu paciencia.")
+            return jsonify({"status": "bloqueado_por_imagen"}), 200
+
+        if sender in bloqueados_temporalmente and now < bloqueados_temporalmente[sender]:
+            return jsonify({"status": "esperando_bloqueo"}), 200
+        else:
+            bloqueados_temporalmente.pop(sender, None)
 
         if sender in clientes_en_soporte and any(p in user_msg for p in ["solucionado", "ya me ayudaron", "gracias", "ya lo resolvi"]):
             clientes_en_soporte.remove(sender)
@@ -173,6 +187,16 @@ def webhook():
             clientes_en_soporte.add(sender)
             enviar_mensaje_whatsapp(sender, "📸 Por favor, envíanos una foto del error y una breve descripción de lo que sucede. Un asesor te atenderá pronto.")
             return jsonify({"status": "modo_soporte_activado"}), 200
+
+        # Sugerencia 15: fuera de horario
+        if now.hour < 7 or now.hour >= 23:
+            enviar_mensaje_whatsapp(sender, "😴 Nuestro equipo está descansando en este momento. Pronto te atenderemos en el horario habitual. ¡Gracias por tu paciencia!")
+            return jsonify({"status": "fuera_de_horario"}), 200
+
+        # Sugerencia 18: derivación a humano
+        if any(palabra in user_msg for palabra in ["urgente", "asesor", "humano", "ayuda urgente", "hablar con alguien"]):
+            enviar_mensaje_whatsapp(sender, "📩 Ya estamos informando a uno de nuestros asesores para que te contacte. ¡Gracias por tu paciencia!")
+            return jsonify({"status": "derivado_a_humano"}), 200
 
         if "metodos de pago" in user_msg:
             enviar_metodos_pago(sender)
@@ -194,10 +218,7 @@ def webhook():
             conversation_memory[sender] = []
         conversation_memory[sender].append({"role": "user", "content": user_msg})
 
-        plataformas_detectadas = any(p in user_msg for p in plataformas)
-        intencion_pago = any(p in user_msg for p in ["pagar", "medio de pago", "como pago", "quiero pagar", "listo", "comprar", "lo compro", "metodo de pago", "quiero comprar", "quiero comprar ahora", "quiero comprar ya","metodos de pago"])
-
-        if not plataformas_detectadas and not intencion_pago:
+        if sender not in ultimo_saludo or now - ultimo_saludo[sender] > timedelta(minutes=30):
             mensaje_bienvenida = """
 ¡Hola! 👋 Gracias por comunicarte con *Multiplay Multimarca*. 🌟  
 Somos tu tienda digital de confianza para cuentas premium de entretenimiento.
@@ -226,6 +247,7 @@ Si tienes dudas o necesitas ayuda para elegir la mejor opción, ¡escríbenos! �
 ✨ ¡Gracias por elegirnos y bienvenido a Multiplay Multimarca!
 """
             enviar_mensaje_whatsapp(sender, mensaje_bienvenida)
+            ultimo_saludo[sender] = now
             return jsonify({"status": "bienvenida_enviada"}), 200
 
         respuesta = generar_respuesta_ia(user_msg)
@@ -238,9 +260,7 @@ Si tienes dudas o necesitas ayuda para elegir la mejor opción, ¡escríbenos! �
         return jsonify({"status": "success"}), 200
 
     except Exception as e:
-        import traceback
         logger.error(f"❌ Error en webhook: {e}")
-        logger.error(traceback.format_exc())
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/health', methods=['GET'])
