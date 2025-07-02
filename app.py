@@ -6,7 +6,7 @@ import openai
 import os
 import logging
 import unicodedata
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 # Cargar variables de entorno desde .env
@@ -47,6 +47,7 @@ conversation_memory = {}
 clientes_en_soporte = set()
 bloqueados_temporalmente = {}
 ultimo_saludo = {}
+ultimo_fuera_horario = {}
 
 # Quitar tildes
 def quitar_tildes(texto):
@@ -163,7 +164,7 @@ def webhook():
         tipo = data['data'].get('type', '')
         body = data['data'].get('body', '')
         user_msg = quitar_tildes(body.lower()) if body else ''
-        now = datetime.utcnow() - timedelta(hours=5)  # Colombia UTC-5
+        now = datetime.utcnow() - timedelta(hours=5)
 
         if tipo == 'image':
             bloqueados_temporalmente[sender] = now + timedelta(hours=1)
@@ -188,12 +189,12 @@ def webhook():
             enviar_mensaje_whatsapp(sender, "📸 Por favor, envíanos una foto del error y una breve descripción de lo que sucede. Un asesor te atenderá pronto.")
             return jsonify({"status": "modo_soporte_activado"}), 200
 
-        # Sugerencia 15: fuera de horario
         if now.hour < 7 or now.hour >= 23:
-            enviar_mensaje_whatsapp(sender, "😴 Nuestro equipo está descansando en este momento. Pronto te atenderemos en el horario habitual. ¡Gracias por tu paciencia!")
+            if sender not in ultimo_fuera_horario or now - ultimo_fuera_horario[sender] > timedelta(minutes=30):
+                enviar_mensaje_whatsapp(sender, "😴 Nuestro equipo está descansando en este momento. Pronto te atenderemos en el horario habitual. ¡Gracias por tu paciencia!")
+                ultimo_fuera_horario[sender] = now
             return jsonify({"status": "fuera_de_horario"}), 200
 
-        # Sugerencia 18: derivación a humano
         if any(palabra in user_msg for palabra in ["urgente", "asesor", "humano", "ayuda urgente", "hablar con alguien"]):
             enviar_mensaje_whatsapp(sender, "📩 Ya estamos informando a uno de nuestros asesores para que te contacte. ¡Gracias por tu paciencia!")
             return jsonify({"status": "derivado_a_humano"}), 200
@@ -202,7 +203,7 @@ def webhook():
             enviar_metodos_pago(sender)
             return jsonify({"status": "metodos_pago_enviado"}), 200
 
-        if any(pago in user_msg for pago in [
+        if any(p in user_msg for p in [
             "pagar", "medio de pago", "como pago", "quiero pagar", "listo",
             "quiero comprar", "comprar ahora", "lo compro", "ya lo compro", "si lo compro",
             "quiero comprarlo", "quiero comprar ahora", "quiero comprar ya"]):
