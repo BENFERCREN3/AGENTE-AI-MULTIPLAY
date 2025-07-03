@@ -1,72 +1,4 @@
-# Función mejorada para quitar tildes con manejo de errores
-def quitar_tildes(texto):
-    try:
-        if not texto or not isinstance(texto, str):
-            return ""
-        return ''.join(c for c in unicodedata.normalize('NFD', texto) if unicodedata.category(c) != 'Mn')
-    except Exception as e:
-        logger.error(f"Error procesando texto: {e}")
-        return str(texto) if texto else ""
-
-# Función para actualizar estadísticas
-def actualizar_estadisticas(sender, accion, extra_data=None):
-    try:
-        estadisticas['mensajes_totales'] += 1
-        estadisticas['usuarios_unicos'].add(sender)
-        
-        if accion == 'plataforma_solicitada' and extra_data:
-            plataforma = extra_data
-            if plataforma not in estadisticas['plataformas_solicitadas']:
-                estadisticas['plataformas_solicitadas'][plataforma] = 0
-            estadisticas['plataformas_solicitadas'][plataforma] += 1
-        elif accion == 'error':
-            estadisticas['errores'] += 1
-            
-    except Exception as e:
-        logger.error(f"Error actualizando estadísticas: {e}")
-
-# Función para limpiar datos periódicamente
-def limpiar_datos_periodicamente():
-    """Limpia datos antiguos cada hora"""
-    try:
-        now = datetime.utcnow()
-        
-        # Limpiar conversaciones inactivas (más de 2 horas)
-        usuarios_a_limpiar = []
-        for sender in conversation_memory:
-            if sender not in ultimo_saludo:
-                continue
-            if now - ultimo_saludo[sender] > timedelta(hours=2):
-                usuarios_a_limpiar.append(sender)
-        
-        for sender in usuarios_a_limpiar:
-            conversation_memory.pop(sender, None)
-            ultimo_saludo.pop(sender, None)
-            ultimo_fuera_horario.pop(sender, None)
-        
-        # Limpiar bloqueos expirados
-        bloqueos_expirados = [
-            sender for sender, tiempo in bloqueados_temporalmente.items()
-            if now > tiempo
-        ]
-        for sender in bloqueos_expirados:
-            bloqueados_temporalmente.pop(sender, None)
-        
-        logger.info(f"🧹 Limpieza completada: {len(usuarios_a_limpiar)} conversaciones, {len(bloqueos_expirados)} bloqueos")
-        
-    except Exception as e:
-        logger.error(f"Error en limpieza periódica: {e}")
-
-# Iniciar hilo de limpieza
-def iniciar_limpieza_periodica():
-    def loop_limpieza():
-        while True:
-            time.sleep(3600)  # Cada hora
-            limpiar_datos_periodicamente()
-    
-    thread = threading.Thread(target=loop_limpieza, daemon=True)
-    thread.start()
-    logger.info("🧹 Hilo de limpieza periódica iniciado")# MULTIPLAY MULTIMARCA Chatbot completo con tildes ignoradas, modo soporte, medios de pago, fichas visuales, horario y derivación a humano
+# MULTIPLAY MULTIMARCA Chatbot completo con tildes ignoradas, modo soporte, medios de pago, fichas visuales, horario y derivación a humano
 
 from flask import Flask, request, jsonify
 import requests
@@ -76,10 +8,8 @@ import logging
 import unicodedata
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-import time
-import json
 import threading
-from functools import wraps
+import time
 import hashlib
 import re
 
@@ -117,549 +47,413 @@ except Exception as e:
     logger.error(f"❌ Error iniciando OpenAI: {e}")
     exit(1)
 
-# Variables globales con inicialización segura
+# Variables de estado
 conversation_memory = {}
 clientes_en_soporte = set()
 bloqueados_temporalmente = {}
 ultimo_saludo = {}
 ultimo_fuera_horario = {}
-mensajes_pendientes = {}  # Para rate limiting
-estadisticas = {
-    'mensajes_totales': 0,
-    'usuarios_unicos': set(),
-    'plataformas_solicitadas': {},
-    'errores': 0,
-    'inicio_bot': datetime.now()
-}
-usuarios_spam = {}  # Anti-spam
-cache_respuestas = {}  # Cache de respuestas comunes
+ultimo_mensaje_usuario = {}  # Anti-spam
+respuestas_enviadas = {}     # Control de respuestas repetidas
+respuestas_generadas = {}    # Últimas respuestas por usuario
+cache_respuestas = {}        # Movido aquí para estar disponible globalmente
 
-# Decorador para rate limiting
-def rate_limit(max_requests=5, time_window=60):
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            sender = request.json.get('data', {}).get('from') if request.json else None
-            if not sender:
-                return func(*args, **kwargs)
-            
-            now = time.time()
-            if sender not in mensajes_pendientes:
-                mensajes_pendientes[sender] = []
-            
-            # Limpiar mensajes antiguos
-            mensajes_pendientes[sender] = [
-                timestamp for timestamp in mensajes_pendientes[sender] 
-                if now - timestamp < time_window
-            ]
-            
-            # Verificar límite
-            if len(mensajes_pendientes[sender]) >= max_requests:
-                if sender not in usuarios_spam:
-                    usuarios_spam[sender] = now
-                    enviar_mensaje_whatsapp(sender, 
-                        "⚠️ Has enviado muchos mensajes. Por favor espera un momento antes de continuar.")
-                return jsonify({"status": "rate_limited"}), 429
-            
-            mensajes_pendientes[sender].append(now)
-            usuarios_spam.pop(sender, None)
-            return func(*args, **kwargs)
-        return wrapper
-    return decorator
+# Función para quitar tildes
+def quitar_tildes(texto):
+    try:
+        if not texto or not isinstance(texto, str):
+            return ""
+        return ''.join(c for c in unicodedata.normalize('NFD', texto) if unicodedata.category(c) != 'Mn')
+    except Exception as e:
+        logger.error(f"Error procesando texto: {e}")
+        return str(texto) if texto else ""
 
-# Función para detectar spam
-def es_spam(mensaje, sender):
-    if not mensaje or len(mensaje) < 2:
-        return True
+# Función para generar clave de cache
+def generar_cache_key(texto):
+    return hashlib.md5(texto.encode()).hexdigest()
+
+# Función para verificar horario comercial
+def es_horario_comercial():
+    """Verifica si está dentro del horario comercial (8:00 - 20:00 hora Colombia)"""
+    try:
+        # Asumiendo UTC-5 para Colombia
+        ahora = datetime.now()
+        hora_colombia = ahora - timedelta(hours=5)  # Ajustar según tu zona horaria
+        hora_actual = hora_colombia.hour
+        return 8 <= hora_actual <= 20
+    except Exception as e:
+        logger.error(f"Error verificando horario: {e}")
+        return True  # Por defecto, permitir operación
+
+# Función para verificar anti-spam
+def es_spam(numero, mensaje):
+    """Verifica si el mensaje es spam basado en frecuencia"""
+    ahora = time.time()
     
-    # Detectar caracteres repetidos
-    if len(set(mensaje)) == 1 and len(mensaje) > 5:
-        return True
+    # Verificar último mensaje del usuario
+    if numero in ultimo_mensaje_usuario:
+        tiempo_transcurrido = ahora - ultimo_mensaje_usuario[numero]
+        if tiempo_transcurrido < 3:  # Menos de 3 segundos
+            return True
     
-    # Detectar URLs sospechosas
-    if re.search(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', mensaje):
-        return True
-    
+    ultimo_mensaje_usuario[numero] = ahora
     return False
 
-# Función para generar respuestas en cache
-def generar_cache_key(mensaje):
-    return hashlib.md5(mensaje.encode()).hexdigest()
-
-# Función mejorada para buscar plataformas
-def buscar_plataforma(mensaje):
-    mensaje_clean = quitar_tildes(mensaje.lower())
-    
-    # Buscar en aliases primero
-    for alias, plataforma in aliases_plataformas.items():
-        if alias in mensaje_clean:
-            if plataforma in plataformas:
-                return plataforma
-            elif plataforma == "directv" and "dgo" in plataformas:
-                return "dgo"
-    
-    # Buscar en plataformas directamente
-    for plataforma in plataformas.keys():
-        if plataforma in mensaje_clean:
-            return plataforma
-    
-    return None
-
-# Función para obtener recomendaciones por categoría
-def obtener_recomendaciones(categoria=None):
-    if not categoria:
-        return "📱 Escribe el nombre de cualquier plataforma para ver sus detalles y precios."
-    
-    recomendaciones = []
-    for nombre, (precio, _, cat) in plataformas.items():
-        if cat == categoria:
-            recomendaciones.append(f"{nombre.title()} - ${precio}")
-    
-    if recomendaciones:
-        return f"🎯 Opciones de {categoria}:\n" + "\n".join(recomendaciones)
-    return "📱 Escribe el nombre de cualquier plataforma para ver sus detalles."
-
-# Diccionario de plataformas con validación de URLs y categorías
+# Diccionario de plataformas
 plataformas = {
-    # Streaming de video
-    "netflix": ("13.000", "https://i.postimg.cc/7ZzgJh3X/NETFLIX.png", "streaming"),
-    "disney": ("9.000", "https://i.postimg.cc/YS1fZ0jj/DISNEY.png", "streaming"),
-    "hbo": ("9.000", "https://i.postimg.cc/pXpQxqyw/HBOMAX.png", "streaming"),
-    "prime": ("9.000", "https://i.postimg.cc/C5d8hxMG/PRIMEVIDEO.png", "streaming"),
-    "vix": ("9.000", "https://i.postimg.cc/y80ZY5Kb/VIX.png", "streaming"),
-    "directv": ("30.000", "https://i.postimg.cc/nzpYJxQ2/DGO.png", "deportes"),
-    "dgo": ("30.000", "https://i.postimg.cc/nzpYJxQ2/DGO.png", "deportes"),
-    
-    # Audio y música
-    "spotify": ("9.000", "https://i.postimg.cc/gj5Znbrf/SPOTIFY.png", "musica"),
-    "youtube": ("9.000", "https://i.postimg.cc/MGDf1Qv0/YTPREMIUMX1.png", "musica"),
-    
-    # Productividad
-    "canva": ("15.000", "https://i.postimg.cc/RVFdhvpb/CANVAPRO.png", "diseño"),
-    "office": ("20.000", "https://i.postimg.cc/bvj1xPLP/OFFICE365.png", "productividad"),
-    "duolingo": ("10.000", "https://i.postimg.cc/1tB0RdGQ/DUOLINGO.png", "educacion"),
-    
-    # Adulto
-    "pornhub": ("12.000", "https://i.postimg.cc/Y9dgBW72/PONHUB.png", "adulto"),
-    "onlyfans": ("20.000", "https://i.postimg.cc/TPqgQsHD/ONLYFANS.png", "adulto")
+    "netflix": ("13.000", "https://i.postimg.cc/7ZzgJh3X/NETFLIX.png"),
+    "spotify": ("9.000", "https://i.postimg.cc/gj5Znbrf/SPOTIFY.png"),
+    "youtube": ("9.000", "https://i.postimg.cc/MGDf1Qv0/YTPREMIUMX1.png"),
+    "canva": ("15.000", "https://i.postimg.cc/RVFdhvpb/CANVAPRO.png"),
+    "vix": ("9.000", "https://i.postimg.cc/y80ZY5Kb/VIX.png"),
+    "disney": ("9.000", "https://i.postimg.cc/YS1fZ0jj/DISNEY.png"),
+    "hbo": ("9.000", "https://i.postimg.cc/pXpQxqyw/HBOMAX.png"),
+    "prime": ("9.000", "https://i.postimg.cc/C5d8hxMG/PRIMEVIDEO.png"),
+    "pornhub": ("12.000", "https://i.postimg.cc/Y9dgBW72/PONHUB.png"),
+    "office": ("20.000", "https://i.postimg.cc/bvj1xPLP/OFFICE365.png"),
+    "duolingo": ("10.000", "https://i.postimg.cc/1tB0RdGQ/DUOLINGO.png"),
+    "onlyfans": ("20.000", "https://i.postimg.cc/TPqgQsHD/ONLYFANS.png"),
+    "directv": ("30.000", "https://i.postimg.cc/nzpYJxQ2/DGO.png")
 }
 
-# Sinónimos y aliases para mejor reconocimiento
-aliases_plataformas = {
-    "nf": "netflix", "netf": "netflix",
-    "spot": "spotify", "spoti": "spotify",
-    "yt": "youtube", "youtube premium": "youtube",
-    "disney+": "disney", "disney plus": "disney",
-    "hbo max": "hbo", "hbomax": "hbo",
-    "amazon prime": "prime", "prime video": "prime",
-    "vix+": "vix", "vix plus": "vix",
-    "office 365": "office", "microsoft office": "office",
-    "duo": "duolingo", "duolingo plus": "duolingo",
-    "of": "onlyfans", "only": "onlyfans",
-    "ph": "pornhub", "pornhub premium": "pornhub",
-    "win sports": "dgo", "directv go": "directv"
-}
-
-# Prompt mejorado
+# Prompt del sistema
 system_prompt = """
 Eres un asistente virtual experto en ventas para MULTIPLAY MULTIMARCA, tienda colombiana de cuentas premium de entretenimiento digital.
 
-✨ Misión:
+✨ MISIÓN:
 - Atender con amabilidad y rapidez
 - Informar precios y beneficios claramente
 - Guiar hacia la compra
 - Resolver dudas frecuentes
 
-✅ Garantías:
+📋 PLATAFORMAS DISPONIBLES:
+- Netflix: $13.000 COP
+- Spotify: $9.000 COP
+- YouTube Premium: $9.000 COP
+- Canva Pro: $15.000 COP
+- VIX+: $9.000 COP
+- Disney+: $9.000 COP
+- HBO Max: $9.000 COP
+- Prime Video: $9.000 COP
+- PornHub Premium: $12.000 COP
+- Office 365: $20.000 COP
+- Duolingo Plus: $10.000 COP
+- OnlyFans: $20.000 COP
+- DirectTV GO: $30.000 COP
+
+✅ GARANTÍAS:
 - Entrega inmediata
 - Soporte 24/7
 - Duración 30 días
 - Privacidad garantizada
 
-Usa emojis de forma moderada. Responde de forma natural como un asesor humano de ventas.
-Siempre sugiere opciones de plataformas disponibles si el usuario no es específico.
+🎯 INSTRUCCIONES:
+- Usa emojis moderadamente
+- Responde como un asesor humano natural
+- Si preguntan por una plataforma específica, menciona precio y beneficios
+- Para métodos de pago, guía hacia el comando "metodos de pago"
+- Para soporte técnico, guía hacia "soporte"
+- Mantén respuestas concisas y útiles
 """
 
-def generar_respuesta_ia(mensaje_usuario, historial=[]):
+def generar_respuesta_ia(mensaje_usuario, numero_usuario, historial=[]):
+    """Genera respuesta usando OpenAI con contexto del usuario"""
     try:
-        messages = [
-            {"role": "system", "content": system_prompt}
-        ]
+        # Verificar cache
+        cache_key = generar_cache_key(f"{numero_usuario}_{mensaje_usuario}")
+        if cache_key in cache_respuestas:
+            return cache_respuestas[cache_key]
+
+        # Obtener historial del usuario
+        historial_usuario = conversation_memory.get(numero_usuario, [])
         
-        # Agregar historial si existe
-        if historial:
-            messages.extend(historial[-6:])  # Solo últimos 6 mensajes para evitar límites
+        # Construir mensajes para OpenAI
+        messages = [{"role": "system", "content": system_prompt}]
         
+        # Agregar historial reciente (últimos 6 mensajes)
+        for msg in historial_usuario[-6:]:
+            messages.append(msg)
+        
+        # Agregar mensaje actual
         messages.append({"role": "user", "content": mensaje_usuario})
         
+        # Llamar a OpenAI
         response = client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=messages,
             temperature=0.3,
             max_tokens=500
         )
-        return response.choices[0].message.content.strip()
+        
+        resultado = response.choices[0].message.content.strip()
+        
+        # Guardar en cache si el mensaje es significativo
+        if len(mensaje_usuario) > 10:
+            cache_respuestas[cache_key] = resultado
+        
+        # Actualizar historial
+        if numero_usuario not in conversation_memory:
+            conversation_memory[numero_usuario] = []
+        
+        conversation_memory[numero_usuario].append({"role": "user", "content": mensaje_usuario})
+        conversation_memory[numero_usuario].append({"role": "assistant", "content": resultado})
+        
+        # Mantener solo los últimos 20 mensajes
+        if len(conversation_memory[numero_usuario]) > 20:
+            conversation_memory[numero_usuario] = conversation_memory[numero_usuario][-20:]
+        
+        return resultado
+        
     except Exception as e:
         logger.error(f"❌ Error con OpenAI: {e}")
-        return "😓 Lo siento, hubo un problema técnico. Pronto te ayudamos. Puedes escribir el nombre de cualquier plataforma para ver nuestras opciones."
+        return "😓 Lo siento, hubo un problema técnico. Pronto te ayudamos."
 
 def enviar_mensaje_whatsapp(numero, mensaje):
-    if not numero or not mensaje:
-        logger.error("Número o mensaje vacío")
-        return None
-        
-    payload = {
-        "token": ULTRAMSG_TOKEN,
-        "to": numero,
-        "body": mensaje
-    }
+    """Envía mensaje por WhatsApp con control de duplicados"""
     try:
-        response = requests.post(ULTRAMSG_CHAT_URL, json=payload, timeout=15)
+        # Verificar duplicados
+        clave = (numero, mensaje)
+        if clave in respuestas_enviadas and time.time() - respuestas_enviadas[clave] < 60:
+            logger.info(f"⏳ Mensaje repetido bloqueado para {numero}")
+            return None
+        
+        # Verificar respuesta exacta repetida
+        if respuestas_generadas.get(numero) == mensaje:
+            logger.info(f"⏳ Respuesta exacta repetida detectada para {numero}")
+            return None
+        
+        # Actualizar registros
+        respuestas_enviadas[clave] = time.time()
+        respuestas_generadas[numero] = mensaje
+
+        # Enviar mensaje
+        payload = {
+            "token": ULTRAMSG_TOKEN,
+            "to": numero,
+            "body": mensaje
+        }
+        
+        response = requests.post(ULTRAMSG_CHAT_URL, json=payload, timeout=10)
+        
         if response.status_code == 200:
             logger.info(f"✅ Mensaje enviado a {numero}")
             return response.json()
         else:
-            logger.error(f"Error HTTP {response.status_code}: {response.text}")
+            logger.error(f"❌ Error HTTP {response.status_code} enviando mensaje")
             return None
-    except requests.exceptions.Timeout:
-        logger.error(f"❌ Timeout enviando mensaje a {numero}")
-        return None
+            
     except Exception as e:
-        logger.error(f"❌ Error enviando mensaje: {e}")
+        logger.error(f"❌ Error enviando mensaje a {numero}: {e}")
         return None
 
 def enviar_ficha_plataforma(numero, nombre, precio, url_imagen):
-    texto = f"""🔴 *{nombre}*: accede al catálogo global con 1 mes de servicio por solo *${precio} COP* 🎥✨
-
-♾️ Garantía incluida
-🛠️ Estabilidad asegurada  
-🕐 Soporte rápido 24/7
-📲 Entrega inmediata
-
-💳 Escribe "metodos de pago" para conocer nuestras opciones de pago
-
-🎯 ¿Te interesa otra plataforma? Solo escribe su nombre."""
-    
+    """Envía ficha visual de la plataforma"""
     try:
+        texto = f"""🔴 *{nombre.upper()}*: Accede al catálogo global con 1 mes de servicio por solo *${precio} COP* 🎥✨
+
+♾️ *Garantía incluida*
+🛠️ *Estabilidad asegurada*
+🕐 *Soporte rápido 24/7*
+📲 *Entrega inmediata*
+
+💳 Escribe *"metodos de pago"* para conocer nuestras opciones de pago"""
+
         payload = {
             "token": ULTRAMSG_TOKEN,
             "to": numero,
             "image": url_imagen,
             "caption": texto
         }
+        
         response = requests.post(ULTRAMSG_IMG_URL, data=payload, timeout=15)
+        
         if response.status_code == 200:
             logger.info(f"✅ Ficha enviada: {nombre} a {numero}")
-            actualizar_estadisticas(numero, 'plataforma_solicitada', nombre.lower())
+            return response.json()
         else:
-            logger.error(f"Error enviando ficha: {response.status_code}")
-            # Fallback: enviar solo texto si falla la imagen
-            enviar_mensaje_whatsapp(numero, texto)
+            logger.error(f"❌ Error enviando ficha: HTTP {response.status_code}")
+            return None
+            
     except Exception as e:
-        logger.error(f"❌ Error enviando ficha: {e}")
-        actualizar_estadisticas(numero, 'error')
-        # Fallback: enviar solo texto
-        enviar_mensaje_whatsapp(numero, texto)
+        logger.error(f"❌ Error enviando ficha de {nombre}: {e}")
+        return None
 
 def enviar_metodos_pago(numero):
-    texto = """💳 *MÉTODOS DE PAGO DISPONIBLES*
-
-> 🟦 *Nequi*: 3144413062 (JH** VAR***)
-
-> 🟥 *Daviplata*: 3144413062
-
-> 🟨 *Bancolombia*: 912-683039-91 (Cuenta de Ahorros)
-
-📸 Por favor, envía el comprobante a este *WHATSAPP* y confirmaremos tu pedido. ¡Gracias por tu compra!
-
-> 🔧 Si tienes alguna duda, escribe "soporte" y te atenderemos de inmediato"""
-    
-    url_pago = "https://i.postimg.cc/SRyhCnY9/Medio-De-Pago-Actualizado.png"
-    
+    """Envía información de métodos de pago"""
     try:
+        texto = """💳 *MÉTODOS DE PAGO DISPONIBLES*
+
+🟦 *Nequi:* 3144413062 (JH** VAR***)
+🟥 *Daviplata:* 3144413062  
+🟨 *Bancolombia:* 912-683039-91 (Cuenta de Ahorros)
+
+📱 *INSTRUCCIONES:*
+1️⃣ Realiza tu pago por cualquier método
+2️⃣ Envía el comprobante a este WhatsApp
+3️⃣ Confirmaremos tu pedido inmediatamente
+
+⚡ *¡Entrega inmediata después del pago!*
+
+❓ Si tienes dudas, escribe *"soporte"* y te atenderemos"""
+
+        url_pago = "https://i.postimg.cc/SRyhCnY9/Medio-De-Pago-Actualizado.png"
+        
         payload = {
             "token": ULTRAMSG_TOKEN,
             "to": numero,
             "image": url_pago,
             "caption": texto
         }
+        
         response = requests.post(ULTRAMSG_IMG_URL, data=payload, timeout=15)
-        if response.status_code != 200:
-            # Fallback: enviar solo texto si falla la imagen
-            enviar_mensaje_whatsapp(numero, texto)
+        
+        if response.status_code == 200:
+            logger.info(f"✅ Métodos de pago enviados a {numero}")
+            return response.json()
+        else:
+            logger.error(f"❌ Error enviando métodos de pago: HTTP {response.status_code}")
+            return None
+            
     except Exception as e:
         logger.error(f"❌ Error enviando métodos de pago: {e}")
-        # Fallback: enviar solo texto
-        enviar_mensaje_whatsapp(numero, texto)
+        return None
 
-def obtener_hora_colombia():
-    """Obtiene la hora actual de Colombia (UTC-5)"""
-    return datetime.utcnow() - timedelta(hours=5)
-
-def validar_estructura_webhook(data):
-    """Valida que el webhook tenga la estructura esperada"""
+def procesar_mensaje(numero, mensaje):
+    """Procesa mensaje entrante y genera respuesta apropiada"""
     try:
-        if not data or 'data' not in data:
-            return False, "Estructura de webhook inválida"
+        # Verificar spam
+        if es_spam(numero, mensaje):
+            logger.info(f"🚫 Spam detectado de {numero}")
+            return None
         
-        data_content = data['data']
-        required_fields = ['from']
+        # Verificar si está bloqueado temporalmente
+        if numero in bloqueados_temporalmente:
+            if datetime.now() < bloqueados_temporalmente[numero]:
+                return None
+            else:
+                bloqueados_temporalmente.pop(numero)
         
-        for field in required_fields:
-            if field not in data_content:
-                return False, f"Campo requerido '{field}' no encontrado"
+        # Limpiar mensaje
+        mensaje_limpio = quitar_tildes(mensaje.lower().strip())
         
-        return True, "OK"
+        # Verificar comandos especiales
+        if "metodos de pago" in mensaje_limpio or "como pagar" in mensaje_limpio:
+            return enviar_metodos_pago(numero)
+        
+        if "soporte" in mensaje_limpio:
+            clientes_en_soporte.add(numero)
+            respuesta = "🔧 *MODO SOPORTE ACTIVADO*\n\n👨‍💻 Un agente humano te atenderá pronto.\n\n⏰ Horario de atención: 8:00 AM - 8:00 PM\n\n📞 Para emergencias: 3144413062"
+            return enviar_mensaje_whatsapp(numero, respuesta)
+        
+        # Verificar si menciona alguna plataforma
+        for plataforma, (precio, imagen) in plataformas.items():
+            if plataforma in mensaje_limpio:
+                return enviar_ficha_plataforma(numero, plataforma, precio, imagen)
+        
+        # Verificar horario comercial
+        if not es_horario_comercial():
+            if numero not in ultimo_fuera_horario or (datetime.now() - ultimo_fuera_horario[numero]).seconds > 3600:
+                ultimo_fuera_horario[numero] = datetime.now()
+                respuesta = "🌙 *FUERA DE HORARIO*\n\nNuestro horario de atención es de *8:00 AM a 8:00 PM*.\n\n📱 Puedes escribirnos y te responderemos en horario comercial.\n\n⚡ Para emergencias: 3144413062"
+                return enviar_mensaje_whatsapp(numero, respuesta)
+        
+        # Generar respuesta con IA
+        respuesta = generar_respuesta_ia(mensaje, numero)
+        return enviar_mensaje_whatsapp(numero, respuesta)
+        
     except Exception as e:
-        return False, f"Error validando estructura: {e}"
+        logger.error(f"❌ Error procesando mensaje de {numero}: {e}")
+        return None
 
+# Función de limpieza de memoria
+def limpiar_memoria():
+    """Limpia memoria cada hora"""
+    while True:
+        try:
+            time.sleep(3600)  # Cada hora
+            ahora = datetime.now()
+            
+            # Limpiar bloqueos temporales expirados
+            expirados = [k for k, v in bloqueados_temporalmente.items() if ahora > v]
+            for k in expirados:
+                bloqueados_temporalmente.pop(k)
+                logger.info(f"🧹 Eliminado bloqueo temporal: {k}")
+            
+            # Limpiar respuestas enviadas antiguas (más de 5 minutos)
+            tiempo_limite = time.time() - 300
+            expiradas = [k for k, v in respuestas_enviadas.items() if v < tiempo_limite]
+            for k in expiradas:
+                respuestas_enviadas.pop(k)
+            
+            # Limpiar respuestas generadas antiguas
+            for numero in list(respuestas_generadas.keys()):
+                if numero not in [k[0] for k in respuestas_enviadas.keys()]:
+                    respuestas_generadas.pop(numero, None)
+            
+            # Limpiar cache de respuestas (mantener solo 1000 entradas)
+            if len(cache_respuestas) > 1000:
+                # Eliminar las más antiguas (simple FIFO)
+                keys_to_remove = list(cache_respuestas.keys())[:500]
+                for k in keys_to_remove:
+                    cache_respuestas.pop(k, None)
+            
+            # Limpiar conversaciones muy largas
+            for numero in list(conversation_memory.keys()):
+                if len(conversation_memory[numero]) > 50:
+                    conversation_memory[numero] = conversation_memory[numero][-30:]
+            
+            logger.info("🧹 Limpieza de memoria completada")
+            
+        except Exception as e:
+            logger.error(f"❌ Error en limpieza de memoria: {e}")
+
+# Ruta principal del webhook
 @app.route('/webhook', methods=['POST'])
-@rate_limit(max_requests=10, time_window=60)
 def webhook():
+    """Webhook principal para recibir mensajes"""
     try:
-        data = request.json
+        data = request.get_json()
         
-        # Validar estructura del webhook
-        is_valid, error_msg = validar_estructura_webhook(data)
-        if not is_valid:
-            logger.error(f"❌ Webhook inválido: {error_msg}")
-            return jsonify({"status": "error", "message": error_msg}), 400
+        if not data:
+            return jsonify({"error": "No data received"}), 400
         
-        sender = data['data']['from']
-        tipo = data['data'].get('type', '')
-        body = data['data'].get('body', '').strip()
+        # Extraer información del mensaje
+        numero = data.get('from', '').replace('@c.us', '')
+        mensaje = data.get('body', '')
         
-        # Validar número de teléfono
-        if not sender or len(sender) < 10:
-            logger.error(f"❌ Número de teléfono inválido: {sender}")
-            return jsonify({"status": "error", "message": "Número inválido"}), 400
+        if not numero or not mensaje:
+            return jsonify({"error": "Missing required fields"}), 400
         
-        user_msg = quitar_tildes(body.lower()) if body else ''
-        now = obtener_hora_colombia()
+        logger.info(f"📨 Mensaje recibido de {numero}: {mensaje[:50]}...")
         
-        # Detectar spam
-        if es_spam(body, sender):
-            logger.warning(f"⚠️ Mensaje spam detectado de {sender}")
-            return jsonify({"status": "spam_detectado"}), 200
+        # Procesar mensaje en hilo separado para no bloquear
+        threading.Thread(
+            target=procesar_mensaje, 
+            args=(numero, mensaje),
+            daemon=True
+        ).start()
         
-        logger.info(f"📱 Mensaje de {sender}: {body[:50]}{'...' if len(body) > 50 else ''}")
-        actualizar_estadisticas(sender, 'mensaje_recibido')
+        return jsonify({"status": "success", "message": "Message processed"}), 200
         
-        # Manejo de imágenes mejorado
-        if tipo == 'image':
-            bloqueados_temporalmente[sender] = now + timedelta(hours=1)
-            enviar_mensaje_whatsapp(sender, "🕒 Hemos recibido tu solicitud. En un momento uno de nuestros encargados se comunicará contigo. Muchas gracias por tu paciencia.")
-            return jsonify({"status": "bloqueado_por_imagen"}), 200
-
-        # Verificar bloqueo temporal
-        if sender in bloqueados_temporalmente and now < bloqueados_temporalmente[sender]:
-            logger.info(f"⏳ Usuario {sender} bloqueado temporalmente")
-            return jsonify({"status": "esperando_bloqueo"}), 200
-        else:
-            bloqueados_temporalmente.pop(sender, None)
-
-        # Salir del modo soporte
-        if sender in clientes_en_soporte and any(palabra in user_msg for palabra in ["solucionado", "ya me ayudaron", "gracias", "ya lo resolvi", "resuelto", "listo"]):
-            clientes_en_soporte.remove(sender)
-            enviar_mensaje_whatsapp(sender, "✅ Nos alegra que se haya solucionado. Ya puedes continuar con normalidad 😊")
-            return jsonify({"status": "soporte_finalizado"}), 200
-
-        # Mantener en modo soporte
-        if sender in clientes_en_soporte:
-            logger.info(f"🔧 Usuario {sender} en modo soporte")
-            return jsonify({"status": "modo_soporte_activo"}), 200
-
-        # Activar modo soporte
-        if "soporte" in user_msg or "ayuda" in user_msg:
-            clientes_en_soporte.add(sender)
-            enviar_mensaje_whatsapp(sender, "🔧 *MODO SOPORTE ACTIVADO*\n\n📸 Por favor, envíanos una foto del error y una breve descripción de lo que sucede. Un asesor te atenderá pronto.\n\nEscribe 'solucionado' cuando se resuelva tu problema.")
-            return jsonify({"status": "modo_soporte_activado"}), 200
-
-        # Verificar horario de atención (7 AM - 11 PM Colombia)
-        if now.hour < 7 or now.hour >= 23:
-            if sender not in ultimo_fuera_horario or now - ultimo_fuera_horario[sender] > timedelta(minutes=30):
-                enviar_mensaje_whatsapp(sender, "😴 Nuestro equipo está descansando en este momento (11:00 PM - 7:00 AM). Te atenderemos en el horario habitual. ¡Gracias por tu paciencia!")
-                ultimo_fuera_horario[sender] = now
-            return jsonify({"status": "fuera_de_horario"}), 200
-
-        # Derivación a humano
-        if any(palabra in user_msg for palabra in ["urgente", "asesor", "humano", "ayuda urgente", "hablar con alguien", "operador"]):
-            enviar_mensaje_whatsapp(sender, "📩 Ya estamos informando a uno de nuestros asesores para que te contacte. ¡Gracias por tu paciencia!")
-            return jsonify({"status": "derivado_a_humano"}), 200
-
-        # Métodos de pago
-        if any(palabra in user_msg for palabra in ["metodos de pago", "método de pago", "como pago", "metodos", "medios de pago"]):
-            enviar_metodos_pago(sender)
-            return jsonify({"status": "metodos_pago_enviado"}), 200
-
-        # Intención de pago/compra
-        if any(palabra in user_msg for palabra in [
-            "pagar", "quiero pagar", "listo", "quiero comprar", "comprar ahora", 
-            "lo compro", "ya lo compro", "si lo compro", "quiero comprarlo", 
-            "quiero comprar ahora", "quiero comprar ya", "hacer pedido", "realizar pedido"]):
-            enviar_metodos_pago(sender)
-            return jsonify({"status": "pago_enviado"}), 200
-
-        # Búsqueda de plataformas mejorada con sinónimos
-        plataforma_encontrada = buscar_plataforma(user_msg)
-        
-        if plataforma_encontrada and plataforma_encontrada in plataformas:
-            precio, imagen, categoria = plataformas[plataforma_encontrada]
-            enviar_ficha_plataforma(sender, plataforma_encontrada.upper(), precio, imagen)
-            return jsonify({"status": "plataforma_enviada", "plataforma": plataforma_encontrada}), 200
-
-        # Inicializar memoria de conversación
-        if sender not in conversation_memory:
-            conversation_memory[sender] = []
-
-        # Mensaje de bienvenida mejorado
-        if sender not in ultimo_saludo or now - ultimo_saludo[sender] > timedelta(minutes=30):
-            mensaje_bienvenida = """¡Hola! 👋 Gracias por comunicarte con *Multiplay Multimarca*. 🌟  
-
-Somos tu tienda digital de confianza para cuentas premium de entretenimiento.
-
-🎁 Te ofrecemos acceso a las mejores plataformas, con garantía, entrega inmediata y soporte 24/7.
-
-📲 *ESCRIBE EL NOMBRE DE LA PLATAFORMA QUE TE INTERESA:*
-
-> 🎨 Canva 
-> 🎬 Netflix 
-> 🎞️ HBO Max 
-> 📺 YouTube Premium 
-> 🎥 ViX+ 
-> ⚽ DGO (WIN Sports) 
-> 📼 Disney+ 
-> 🎧 Spotify 
-> 📦 Prime Video
-> 🔞 Pornhub Premium 
-> 🔥 OnlyFans (con saldo) 
-> 💼 Office 365 
-> 🦉 Duolingo 
-
-> 🔧 *SOPORTE TÉCNICO*: Si tienes algún problema, escribe "soporte"
-
-✨ ¡Gracias por elegirnos!"""
-            
-            enviar_mensaje_whatsapp(sender, mensaje_bienvenida)
-            ultimo_saludo[sender] = now
-            return jsonify({"status": "bienvenida_enviada"}), 200
-
-        # Respuesta con IA mejorada (con cache)
-        cache_key = generar_cache_key(user_msg)
-        if cache_key in cache_respuestas:
-            respuesta = cache_respuestas[cache_key]
-            logger.info(f"📦 Respuesta desde cache para {sender}")
-        else:
-            conversation_memory[sender].append({"role": "user", "content": user_msg})
-            respuesta = generar_respuesta_ia(user_msg, conversation_memory[sender])
-            
-            # Guardar en cache si es una respuesta común
-            if len(user_msg) > 10 and "precio" not in user_msg:
-                cache_respuestas[cache_key] = respuesta
-                # Limitar tamaño del cache
-                if len(cache_respuestas) > 100:
-                    # Eliminar las primeras 20 entradas
-                    for _ in range(20):
-                        cache_respuestas.pop(next(iter(cache_respuestas)))
-        
-        conversation_memory[sender].append({"role": "assistant", "content": respuesta})
-        
-        enviar_mensaje_whatsapp(sender, respuesta)
-
-        # Limpiar memoria si es muy larga
-        if len(conversation_memory[sender]) > 20:
-            conversation_memory[sender] = conversation_memory[sender][-10:]
-
-        return jsonify({"status": "success"}), 200
-
-    except KeyError as e:
-        logger.error(f"❌ Campo faltante en webhook: {e}")
-        return jsonify({"status": "error", "message": f"Campo faltante: {e}"}), 400
     except Exception as e:
         logger.error(f"❌ Error en webhook: {e}")
-        return jsonify({"status": "error", "message": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
-@app.route('/health', methods=['GET'])
-def health():
-    try:
-        now = obtener_hora_colombia()
-        uptime = now - estadisticas['inicio_bot']
-        
-        return jsonify({
-            "status": "ok",
-            "time": now.isoformat(),
-            "uptime_hours": round(uptime.total_seconds() / 3600, 2),
-            "active_conversations": len(conversation_memory),
-            "soporte_activo": len(clientes_en_soporte),
-            "bloqueados": len(bloqueados_temporalmente),
-            "usuarios_totales": len(estadisticas['usuarios_unicos']),
-            "mensajes_totales": estadisticas['mensajes_totales'],
-            "errores": estadisticas['errores'],
-            "plataformas_populares": dict(sorted(
-                estadisticas['plataformas_solicitadas'].items(), 
-                key=lambda x: x[1], reverse=True
-            )[:5]),
-            "cache_size": len(cache_respuestas),
-            "version": "2.0"
-        })
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+# Ruta de estado
+@app.route('/status', methods=['GET'])
+def status():
+    """Endpoint para verificar estado del bot"""
+    return jsonify({
+        "status": "active",
+        "timestamp": datetime.now().isoformat(),
+        "usuarios_activos": len(conversation_memory),
+        "clientes_en_soporte": len(clientes_en_soporte),
+        "bloqueados": len(bloqueados_temporalmente)
+    })
 
-@app.route('/')
-def home():
-    return """
-    <html>
-    <head><title>MULTIPLAY MULTIMARCA Bot</title></head>
-    <body>
-        <h2>✅ MULTIPLAY MULTIMARCA Bot en ejecución</h2>
-        <p>Status: Activo</p>
-        <p>Versión: 1.1</p>
-        <a href="/health">Ver Estado del Sistema</a>
-    </body>
-    </html>
-    """
-
-# Endpoint para estadísticas detalladas (solo para administradores)
-@app.route('/stats', methods=['GET'])
-def estadisticas_detalladas():
-    try:
-        now = obtener_hora_colombia()
-        uptime = now - estadisticas['inicio_bot']
-        
-        return jsonify({
-            "resumen": {
-                "uptime_days": uptime.days,
-                "uptime_hours": round(uptime.total_seconds() / 3600, 2),
-                "usuarios_unicos": len(estadisticas['usuarios_unicos']),
-                "mensajes_totales": estadisticas['mensajes_totales'],
-                "tasa_error": round((estadisticas['errores'] / max(estadisticas['mensajes_totales'], 1)) * 100, 2),
-                "promedio_mensajes_hora": round(estadisticas['mensajes_totales'] / max(uptime.total_seconds() / 3600, 1), 2)
-            },
-            "plataformas_solicitadas": estadisticas['plataformas_solicitadas'],
-            "estado_actual": {
-                "conversaciones_activas": len(conversation_memory),
-                "usuarios_en_soporte": len(clientes_en_soporte),
-                "usuarios_bloqueados": len(bloqueados_temporalmente),
-                "cache_respuestas": len(cache_respuestas),
-                "usuarios_spam": len(usuarios_spam)
-            },
-            "tiempo_respuesta": "< 2 segundos",
-            "version": "2.0"
-        })
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-# Endpoint para limpiar cache
-@app.route('/clear-cache', methods=['POST'])
-def clear_cache():
-    try:
-        cache_respuestas.clear()
-        usuarios_spam.clear()
-        return jsonify({"status": "cache_limpiado", "message": "Cache y datos de spam limpiados"})
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+# Iniciar hilo de limpieza
+threading.Thread(target=limpiar_memoria, daemon=True).start()
 
 if __name__ == '__main__':
-    logger.info("🚀 MULTIPLAY MULTIMARCA bot iniciado - Versión 2.0")
-    iniciar_limpieza_periodica()
-    app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
+    logger.info("🚀 Iniciando MULTIPLAY MULTIMARCA Chatbot...")
+    app.run(host='0.0.0.0', port=5000, debug=False)
