@@ -33,19 +33,20 @@ ULTRAMSG_IMG_URL = f"https://api.ultramsg.com/{ULTRAMSG_INSTANCE}/messages/image
 # Validaciones
 if not OPENAI_API_KEY or not OPENAI_API_KEY.startswith('sk-'):
     logger.error("❌ OPENAI_API_KEY inválida o no encontrada")
-    exit(1)
+    OPENAI_API_KEY = None
 if not ULTRAMSG_TOKEN:
     logger.error("❌ ULTRAMSG_TOKEN no configurado")
     exit(1)
 
 # Cliente OpenAI
-from openai import OpenAI
-try:
-    client = OpenAI(api_key=OPENAI_API_KEY)
-    logger.info("✅ Cliente OpenAI listo")
-except Exception as e:
-    logger.error(f"❌ Error iniciando OpenAI: {e}")
-    exit(1)
+client = None
+if OPENAI_API_KEY:
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=OPENAI_API_KEY)
+        logger.info("✅ Cliente OpenAI listo")
+    except Exception as e:
+        logger.error(f"❌ Error iniciando OpenAI: {e}")
 
 conversation_memory = {}
 clientes_en_soporte = set()
@@ -54,9 +55,8 @@ ultimo_saludo = {}
 ultimo_fuera_horario = {}
 ultimo_mensaje_usuario = {}  # Anti-spam
 respuestas_enviadas = {}     # Control de respuestas repetidas
-
-# ✅ NUEVO: Registro de respuestas por usuario
-respuestas_previas = {}
+respuestas_previas = {}      # Registro de respuestas por usuario
+cache_respuestas = {}
 
 # Función para quitar tildes
 def quitar_tildes(texto):
@@ -68,12 +68,9 @@ def quitar_tildes(texto):
         logger.error(f"Error procesando texto: {e}")
         return str(texto) if texto else ""
 
-# Cache de respuestas
-cache_respuestas = {}
 def generar_cache_key(texto):
     return hashlib.md5(texto.encode()).hexdigest()
 
-# Diccionario de plataformas
 plataformas = {
     "netflix": ("13.000", "https://i.postimg.cc/7ZzgJh3X/NETFLIX.png"),
     "spotify": ("9.000", "https://i.postimg.cc/gj5Znbrf/SPOTIFY.png"),
@@ -90,7 +87,6 @@ plataformas = {
     "directv": ("30.000", "https://i.postimg.cc/nzpYJxQ2/DGO.png")
 }
 
-# Prompt
 system_prompt = """
 Eres un asistente virtual experto en ventas para MULTIPLAY MULTIMARCA, tienda colombiana de cuentas premium de entretenimiento digital.
 
@@ -110,6 +106,8 @@ Usa emojis de forma moderada. Responde de forma natural como un asesor humano de
 """
 
 def generar_respuesta_ia(mensaje_usuario, historial=[]):
+    if not client:
+        return "😓 Lo siento, no puedo generar respuestas en este momento."
     try:
         cache_key = generar_cache_key(mensaje_usuario)
         if cache_key in cache_respuestas:
