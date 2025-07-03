@@ -8,10 +8,6 @@ import logging
 import unicodedata
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-import threading
-import time
-import hashlib
-import re
 
 # Cargar variables de entorno desde .env
 load_dotenv()
@@ -33,44 +29,31 @@ ULTRAMSG_IMG_URL = f"https://api.ultramsg.com/{ULTRAMSG_INSTANCE}/messages/image
 # Validaciones
 if not OPENAI_API_KEY or not OPENAI_API_KEY.startswith('sk-'):
     logger.error("❌ OPENAI_API_KEY inválida o no encontrada")
-    OPENAI_API_KEY = None
+    exit(1)
 if not ULTRAMSG_TOKEN:
     logger.error("❌ ULTRAMSG_TOKEN no configurado")
     exit(1)
 
 # Cliente OpenAI
-client = None
-if OPENAI_API_KEY:
-    try:
-        from openai import OpenAI
-        client = OpenAI(api_key=OPENAI_API_KEY)
-        logger.info("✅ Cliente OpenAI listo")
-    except Exception as e:
-        logger.error(f"❌ Error iniciando OpenAI: {e}")
+from openai import OpenAI
+try:
+    client = OpenAI(api_key=OPENAI_API_KEY)
+    logger.info("✅ Cliente OpenAI listo")
+except Exception as e:
+    logger.error(f"❌ Error iniciando OpenAI: {e}")
+    exit(1)
 
 conversation_memory = {}
 clientes_en_soporte = set()
 bloqueados_temporalmente = {}
 ultimo_saludo = {}
 ultimo_fuera_horario = {}
-ultimo_mensaje_usuario = {}  # Anti-spam
-respuestas_enviadas = {}     # Control de respuestas repetidas
-respuestas_previas = {}      # Registro de respuestas por usuario
-cache_respuestas = {}
 
-# Función para quitar tildes
+# Quitar tildes
 def quitar_tildes(texto):
-    try:
-        if not texto or not isinstance(texto, str):
-            return ""
-        return ''.join(c for c in unicodedata.normalize('NFD', texto) if unicodedata.category(c) != 'Mn')
-    except Exception as e:
-        logger.error(f"Error procesando texto: {e}")
-        return str(texto) if texto else ""
+    return ''.join(c for c in unicodedata.normalize('NFD', texto) if unicodedata.category(c) != 'Mn')
 
-def generar_cache_key(texto):
-    return hashlib.md5(texto.encode()).hexdigest()
-
+# Diccionario de plataformas
 plataformas = {
     "netflix": ("13.000", "https://i.postimg.cc/7ZzgJh3X/NETFLIX.png"),
     "spotify": ("9.000", "https://i.postimg.cc/gj5Znbrf/SPOTIFY.png"),
@@ -87,6 +70,7 @@ plataformas = {
     "directv": ("30.000", "https://i.postimg.cc/nzpYJxQ2/DGO.png")
 }
 
+# Prompt
 system_prompt = """
 Eres un asistente virtual experto en ventas para MULTIPLAY MULTIMARCA, tienda colombiana de cuentas premium de entretenimiento digital.
 
@@ -106,13 +90,7 @@ Usa emojis de forma moderada. Responde de forma natural como un asesor humano de
 """
 
 def generar_respuesta_ia(mensaje_usuario, historial=[]):
-    if not client:
-        return "😓 Lo siento, no puedo generar respuestas en este momento."
     try:
-        cache_key = generar_cache_key(mensaje_usuario)
-        if cache_key in cache_respuestas:
-            return cache_respuestas[cache_key]
-
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": mensaje_usuario}
@@ -123,27 +101,12 @@ def generar_respuesta_ia(mensaje_usuario, historial=[]):
             temperature=0.3,
             max_tokens=500
         )
-        resultado = response.choices[0].message.content.strip()
-        if len(mensaje_usuario) > 10:
-            cache_respuestas[cache_key] = resultado
-        return resultado
+        return response.choices[0].message.content.strip()
     except Exception as e:
         logger.error(f"❌ Error con OpenAI: {e}")
         return "😓 Lo siento, hubo un problema técnico. Pronto te ayudamos."
 
 def enviar_mensaje_whatsapp(numero, mensaje):
-    clave = (numero, mensaje)
-    if clave in respuestas_enviadas and time.time() - respuestas_enviadas[clave] < 60:
-        logger.info(f"⏳ Mensaje repetido bloqueado para {numero}")
-        return None
-
-    if numero in respuestas_previas and respuestas_previas[numero] == mensaje:
-        logger.info(f"⛔ Repetición exacta detectada para {numero}")
-        return None
-
-    respuestas_enviadas[clave] = time.time()
-    respuestas_previas[numero] = mensaje
-
     payload = {
         "token": ULTRAMSG_TOKEN,
         "to": numero,
@@ -193,22 +156,126 @@ Por favor, envía el comprobante a este *WHATSAPP* y confirmaremos tu pedido. ¡
         }
     )
 
-def limpiar_memoria():
-    while True:
-        time.sleep(3600)
-        ahora = datetime.utcnow()
-        expirados = [k for k, v in bloqueados_temporalmente.items() if ahora > v]
-        for k in expirados:
-            bloqueados_temporalmente.pop(k)
-            logger.info(f"🧹 Eliminado bloqueo temporal: {k}")
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    try:
+        data = request.json
+        sender = data['data']['from']
+        tipo = data['data'].get('type', '')
+        body = data['data'].get('body', '')
+        user_msg = quitar_tildes(body.lower()) if body else ''
+        now = datetime.utcnow() - timedelta(hours=5)
 
-        expiradas = [k for k, v in respuestas_enviadas.items() if time.time() - v > 300]
-        for k in expiradas:
-            respuestas_enviadas.pop(k)
-        expiradas_previas = [k for k, v in respuestas_previas.items() if k not in [x[0] for x in respuestas_enviadas]]
-        for k in expiradas_previas:
-            respuestas_previas.pop(k)
+        if tipo == 'image':
+            bloqueados_temporalmente[sender] = now + timedelta(hours=1)
+            enviar_mensaje_whatsapp(sender, "🕒 Hemos recibido tu solicitud. En un momento uno de nuestros encargados se comunicará contigo. Muchas gracias por tu paciencia.")
+            return jsonify({"status": "bloqueado_por_imagen"}), 200
 
-        logger.info("🧹 Limpieza periódica completada")
+        if sender in bloqueados_temporalmente and now < bloqueados_temporalmente[sender]:
+            return jsonify({"status": "esperando_bloqueo"}), 200
+        else:
+            bloqueados_temporalmente.pop(sender, None)
 
-threading.Thread(target=limpiar_memoria, daemon=True).start()
+        if sender in clientes_en_soporte and any(p in user_msg for p in ["solucionado", "ya me ayudaron", "gracias", "ya lo resolvi"]):
+            clientes_en_soporte.remove(sender)
+            enviar_mensaje_whatsapp(sender, "✅ Nos alegra que se haya solucionado. Ya puedes continuar con normalidad 😊.")
+            return jsonify({"status": "soporte_finalizado"}), 200
+
+        if sender in clientes_en_soporte:
+            return jsonify({"status": "modo_soporte_activo"}), 200
+
+        if "soporte" in user_msg:
+            clientes_en_soporte.add(sender)
+            enviar_mensaje_whatsapp(sender, "📸 Por favor, envíanos una foto del error y una breve descripción de lo que sucede. Un asesor te atenderá pronto.")
+            return jsonify({"status": "modo_soporte_activado"}), 200
+
+        if now.hour < 7 or now.hour >= 23:
+            if sender not in ultimo_fuera_horario or now - ultimo_fuera_horario[sender] > timedelta(minutes=30):
+                enviar_mensaje_whatsapp(sender, "😴 Nuestro equipo está descansando en este momento. Pronto te atenderemos en el horario habitual. ¡Gracias por tu paciencia!")
+                ultimo_fuera_horario[sender] = now
+            return jsonify({"status": "fuera_de_horario"}), 200
+
+        if any(palabra in user_msg for palabra in ["urgente", "asesor", "humano", "ayuda urgente", "hablar con alguien"]):
+            enviar_mensaje_whatsapp(sender, "📩 Ya estamos informando a uno de nuestros asesores para que te contacte. ¡Gracias por tu paciencia!")
+            return jsonify({"status": "derivado_a_humano"}), 200
+
+        if "metodos de pago" in user_msg:
+            enviar_metodos_pago(sender)
+            return jsonify({"status": "metodos_pago_enviado"}), 200
+
+        if any(p in user_msg for p in [
+            "pagar", "medio de pago", "como pago", "quiero pagar", "listo",
+            "quiero comprar", "comprar ahora", "lo compro", "ya lo compro", "si lo compro",
+            "quiero comprarlo", "quiero comprar ahora", "quiero comprar ya"]):
+            enviar_metodos_pago(sender)
+            return jsonify({"status": "pago_enviado"}), 200
+
+        for clave, (precio, imagen) in plataformas.items():
+            if clave in user_msg:
+                enviar_ficha_plataforma(sender, clave.upper(), precio, imagen)
+                return jsonify({"status": "plataforma_enviada"}), 200
+
+        if sender not in conversation_memory:
+            conversation_memory[sender] = []
+        conversation_memory[sender].append({"role": "user", "content": user_msg})
+
+        if sender not in ultimo_saludo or now - ultimo_saludo[sender] > timedelta(minutes=30):
+            mensaje_bienvenida = """
+¡Hola! 👋 Gracias por comunicarte con *Multiplay Multimarca*. 🌟  
+Somos tu tienda digital de confianza para cuentas premium de entretenimiento.
+
+🎁 Te ofrecemos acceso a las mejores plataformas, con garantía, entrega inmediata y soporte 24/7.
+
+Si tienes dudas o necesitas ayuda para elegir la mejor opción, ¡escríbenos! 💬 Estamos aquí para brindarte una atención rápida, segura y personalizada.
+
+📲 Solo escribe la palabra de la plataforma que te interesa y te enviaremos toda la información:
+
+> 🎨 Canva  
+> 🎬 Netflix  
+> 🎞️ HBO Max  
+> 📺 YouTube Premium  
+> 🎥 ViX+  
+> ⚽ DGO (incluye WIN Sports)  
+> 📼 Disney+  
+> 🎧 Spotify  
+> 📦 Prime Video  
+> 🔞 Pornhub Premium  
+> 🔥 OnlyFans (con saldo)  
+> 💼 Office 365
+
+> *SOPORTE TÉCNICO*🔧: Si tienes algún problema o error, escribe "soporte" y te atenderemos de inmediato. Estamos aquí para ayudarte a resolver cualquier inconveniente.
+
+✨ ¡Gracias por elegirnos y bienvenido a Multiplay Multimarca!
+"""
+            enviar_mensaje_whatsapp(sender, mensaje_bienvenida)
+            ultimo_saludo[sender] = now
+            return jsonify({"status": "bienvenida_enviada"}), 200
+
+        respuesta = generar_respuesta_ia(user_msg)
+        conversation_memory[sender].append({"role": "assistant", "content": respuesta})
+        enviar_mensaje_whatsapp(sender, respuesta)
+
+        if len(conversation_memory[sender]) > 20:
+            conversation_memory[sender] = conversation_memory[sender][-10:]
+
+        return jsonify({"status": "success"}), 200
+
+    except Exception as e:
+        logger.error(f"❌ Error en webhook: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/health', methods=['GET'])
+def health():
+    return jsonify({
+        "status": "ok",
+        "time": datetime.now().isoformat(),
+        "active_users": len(conversation_memory)
+    })
+
+@app.route('/')
+def home():
+    return "<h2>✅ MULTIPLAY MULTIMARCA Bot en ejecución</h2>"
+
+if __name__ == '__main__':
+    logger.info("🚀 MULTIPLAY MULTIMARCA bot iniciado")
+    app.run(host='0.0.0.0', port=5000)
